@@ -388,6 +388,16 @@ fn deny_confirmation(id: String, state: State<AppState>) {
     state.ipc.lock().unwrap().deny_confirmation(id);
 }
 
+/// Approve only the listed items of a batch; the daemon denies the rest (#187).
+#[tauri::command]
+fn partial_approve_confirmation(id: String, approved_indices: Vec<usize>, state: State<AppState>) {
+    state
+        .ipc
+        .lock()
+        .unwrap()
+        .partial_approve_confirmation(id, approved_indices);
+}
+
 #[tauri::command]
 fn approve_all_confirmations(state: State<AppState>) {
     state.ipc.lock().unwrap().approve_all_confirmations();
@@ -768,6 +778,7 @@ pub fn run() {
             list_confirmations,
             approve_confirmation,
             deny_confirmation,
+            partial_approve_confirmation,
             approve_all_confirmations,
             list_sessions,
             create_session,
@@ -880,7 +891,12 @@ fn poll_loop(
                     }
                     let _ = app.emit("ipc-config-error", ConfigErrorPayload { key, message });
                 }
-                IpcEvent::Error(_) => {}
+                IpcEvent::Error(message) => {
+                    // Was silently discarded, so a daemon-side error or a
+                    // malformed line left the UI showing nothing at all --
+                    // its siblings (SessionError/ConfigError) both surface.
+                    let _ = app.emit("ipc-error", message);
+                }
                 IpcEvent::SessionList(sessions) => {
                     let _ = app.emit("ipc-session-list", sessions);
                 }
