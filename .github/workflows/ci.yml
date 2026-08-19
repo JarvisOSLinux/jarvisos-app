@@ -19,6 +19,65 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # Tauri links against the system webview; without these the build fails
+      # at link time rather than in anything this repo controls.
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libsoup-3.0-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
       - name: Format
         working-directory: src-tauri
         run: cargo fmt --check
+
+      - name: Clippy
+        working-directory: src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Build
+        working-directory: src-tauri
+        run: cargo build --locked
+
+      - name: Test
+        working-directory: src-tauri
+        run: cargo test
+
+      # bundle.icon files are committed and generated procedurally. If a
+      # regenerate drifts from what is checked in, the icons a release ships
+      # stop matching the script that claims to produce them.
+      - name: Icons match their generator
+        run: |
+          python3 src-tauri/icons/generate_icon_source.py
+          git diff --exit-code -- src-tauri/icons
+
+  # A Windows build break has shipped here before (the time/cookie pin), and
+  # ubuntu-only CI could not have caught it.
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Build
+        working-directory: src-tauri
+        run: cargo build --locked
+
+      - name: Test
+        working-directory: src-tauri
+        run: cargo test
