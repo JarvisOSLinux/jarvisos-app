@@ -53,13 +53,13 @@ jobs:
         working-directory: src-tauri
         run: cargo test
 
-      # bundle.icon files are committed and generated procedurally. If a
-      # regenerate drifts from what is checked in, the icons a release ships
-      # stop matching the script that claims to produce them.
+      # bundle.icon files are committed and generated procedurally. If they
+      # drift from the script, the icons a release ships stop matching the
+      # thing that claims to produce them. Compares pixels rather than file
+      # bytes: deflate output differs between zlib builds, so byte equality
+      # fails across machines while nothing is actually wrong.
       - name: Icons match their generator
-        run: |
-          python3 src-tauri/icons/generate_icon_source.py
-          git diff --exit-code -- src-tauri/icons
+        run: python3 src-tauri/icons/generate_icon_source.py --check
 
   # A Windows build break has shipped here before (the time/cookie pin), and
   # ubuntu-only CI could not have caught it.

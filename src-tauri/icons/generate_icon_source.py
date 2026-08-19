@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Generate every icon bundle.icon references, with no third-party deps.
 
-    python3 src-tauri/icons/generate_icon_source.py
+    python3 src-tauri/icons/generate_icon_source.py           # write
+    python3 src-tauri/icons/generate_icon_source.py --check   # verify
 
 Writes icon-source.png plus the five files tauri.conf.json requires:
 32x32.png, 128x128.png, 128x128@2x.png, icon.icns, icon.ico. Those five
@@ -11,10 +12,16 @@ only icon-source.png and left the rest to `cargo tauri icon`, which meant
 `cargo build` failed on any machine that had not run the CLI by hand).
 
 The art is procedural, so each size is rendered at its own resolution
-rather than resampled, and regenerating is byte-deterministic.
+rather than resampled.
+
+--check compares PIXELS, not file bytes: deflate output differs between zlib
+builds, so two correct runs on different machines produce different bytes for
+identical images. A byte comparison here fails on CI while nothing is actually
+wrong.
 """
 import os
 import struct
+import sys
 import zlib
 
 SIZE = 1024
@@ -87,8 +94,81 @@ def write_icns(path, type_sizes):
         f.write(b'icns' + struct.pack(">I", len(body) + 8) + body)
 
 
+def png_pixels(data):
+    """Decode one of OUR PNGs to raw RGBA rows.
+
+    Only handles what png_bytes writes -- 8-bit RGBA, no interlace, every row
+    filtered with type 0 (None) -- so unfiltering is just dropping each row's
+    leading filter byte.
+    """
+    assert data[:8] == b'\x89PNG\r\n\x1a\n', "not a PNG"
+    pos, width, idat = 8, None, b''
+    while pos < len(data):
+        length = struct.unpack(">I", data[pos:pos + 4])[0]
+        tag = data[pos + 4:pos + 8]
+        body = data[pos + 8:pos + 8 + length]
+        if tag == b'IHDR':
+            width = struct.unpack(">II", body[:8])[0]
+        elif tag == b'IDAT':
+            idat += body
+        pos += 12 + length
+    raw = zlib.decompress(idat)
+    stride = width * 4 + 1
+    return [raw[i + 1:i + stride] for i in range(0, len(raw), stride)]
+
+
+def embedded_pngs(data):
+    """Yield each PNG blob inside an ICO or ICNS container."""
+    sig = b'\x89PNG\r\n\x1a\n'
+    start = data.find(sig)
+    while start != -1:
+        end = data.find(sig, start + 1)
+        yield data[start:end if end != -1 else len(data)]
+        start = end
+
+
+def check(here, targets):
+    failures = []
+    for name, expected_sizes in targets:
+        path = os.path.join(here, name)
+        if not os.path.exists(path):
+            failures.append(f"{name}: missing")
+            continue
+        with open(path, 'rb') as f:
+            blob = f.read()
+        found = list(embedded_pngs(blob)) if name.endswith(('.ico', '.icns')) \
+            else [blob]
+        if len(found) != len(expected_sizes):
+            failures.append(
+                f"{name}: holds {len(found)} image(s), expected "
+                f"{len(expected_sizes)}")
+            continue
+        for image, size in zip(found, expected_sizes):
+            if png_pixels(image) != make_pixels(size):
+                failures.append(f"{name}: {size}x{size} pixels differ")
+    return failures
+
+
 if __name__ == "__main__":
     here = os.path.dirname(__file__)
+    targets = [
+        ("32x32.png", [32]),
+        ("128x128.png", [128]),
+        ("128x128@2x.png", [256]),
+        ("icon.ico", [16, 32, 48, 64, 128, 256]),
+        ("icon.icns", [128, 256, 512]),
+    ]
+
+    if "--check" in sys.argv:
+        problems = check(here, targets)
+        if problems:
+            print("committed icons do not match this generator:")
+            for line in problems:
+                print(f"  {line}")
+            sys.exit(1)
+        print("committed icons match this generator")
+        sys.exit(0)
+
     write_png(os.path.join(here, "icon-source.png"), SIZE)
     write_png(os.path.join(here, "32x32.png"), 32)
     write_png(os.path.join(here, "128x128.png"), 128)

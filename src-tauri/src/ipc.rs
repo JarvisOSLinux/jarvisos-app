@@ -768,7 +768,13 @@ fn parse_daemon_message(line: &str) -> IpcEvent {
     }
 }
 
-#[cfg(test)]
+// These drive a real AF_UNIX socket, so they are Unix-only: on Windows the
+// transport is TCP-on-localhost plus a port file (see connect_to_daemon's
+// cfg(windows) arm), which this harness does not stand up. The Windows CI job
+// therefore COMPILE-checks the Windows IPC path but does not round-trip it --
+// a known gap, and the reason the job still earns its place is that the break
+// which shipped here before (the time/cookie pin) was a compile break.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;
