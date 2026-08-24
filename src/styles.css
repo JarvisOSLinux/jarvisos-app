@@ -382,6 +382,37 @@ body {
     word-break: break-word;
 }
 
+.permission-item-tasks {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.permission-task {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    cursor: pointer;
+}
+
+.permission-task input {
+    margin: 2px 0 0 0;
+    accent-color: var(--primary);
+    flex-shrink: 0;
+}
+
+.permission-task-text {
+    font-size: 13px;
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    word-break: break-word;
+}
+
+.permission-action:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
 .permission-item-meta {
     font-size: 10px;
     color: var(--text-secondary);

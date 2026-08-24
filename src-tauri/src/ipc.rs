@@ -144,6 +144,10 @@ pub enum IpcCommand {
     DenyConfirmation {
         id: String,
     },
+    PartialApproveConfirmation {
+        id: String,
+        approved_indices: Vec<usize>,
+    },
     ApproveAllConfirmations,
     SetWakeChimePath {
         path: String,
@@ -185,7 +189,6 @@ pub enum IpcCommand {
     },
     ListClients,
     RequestDaemonShutdown,
-    Shutdown,
 }
 
 pub struct IpcClient {
@@ -249,6 +252,16 @@ impl IpcClient {
 
     pub fn deny_confirmation(&self, id: String) {
         let _ = self.command_tx.send(IpcCommand::DenyConfirmation { id });
+    }
+
+    /// Approve only the listed items of a batch; the rest are denied (#187).
+    pub fn partial_approve_confirmation(&self, id: String, approved_indices: Vec<usize>) {
+        let _ = self
+            .command_tx
+            .send(IpcCommand::PartialApproveConfirmation {
+                id,
+                approved_indices,
+            });
     }
 
     pub fn approve_all_confirmations(&self) {
@@ -346,18 +359,16 @@ impl Default for IpcClient {
 
 fn ipc_thread(event_tx: Sender<IpcEvent>, command_rx: Receiver<IpcCommand>) {
     loop {
-        match connect_to_daemon() {
-            Ok(stream) => {
-                let _ = event_tx.send(IpcEvent::Connected);
-                run_connected(&stream, &event_tx, &command_rx);
-                let _ = event_tx.send(IpcEvent::Disconnected);
-            }
-            Err(_) => {}
+        if let Ok(stream) = connect_to_daemon() {
+            let _ = event_tx.send(IpcEvent::Connected);
+            run_connected(&stream, &event_tx, &command_rx);
+            let _ = event_tx.send(IpcEvent::Disconnected);
         }
 
-        match command_rx.try_recv() {
-            Ok(IpcCommand::Shutdown) | Err(TryRecvError::Disconnected) => return,
-            _ => {}
+        // The client dropped its sender: nothing will ever ask again, so stop
+        // reconnecting instead of spinning for the life of the process.
+        if let Err(TryRecvError::Disconnected) = command_rx.try_recv() {
+            return;
         }
 
         thread::sleep(RECONNECT_DELAY);
@@ -460,6 +471,20 @@ fn run_connected(
                 let msg = format!(
                     "{}\n",
                     serde_json::json!({"type":"approve_confirmation","id":id})
+                );
+                let _ = write_stream.write_all(msg.as_bytes());
+            }
+            Ok(IpcCommand::PartialApproveConfirmation {
+                id,
+                approved_indices,
+            }) => {
+                let msg = format!(
+                    "{}\n",
+                    serde_json::json!({
+                        "type": "partial_approve_confirmation",
+                        "id": id,
+                        "approved_indices": approved_indices,
+                    })
                 );
                 let _ = write_stream.write_all(msg.as_bytes());
             }
@@ -573,7 +598,6 @@ fn run_connected(
                 let msg = format!("{}\n", serde_json::json!({"type":"delete_session","id":id}));
                 let _ = write_stream.write_all(msg.as_bytes());
             }
-            Ok(IpcCommand::Shutdown) => return,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
         }
@@ -744,7 +768,13 @@ fn parse_daemon_message(line: &str) -> IpcEvent {
     }
 }
 
-#[cfg(test)]
+// These drive a real AF_UNIX socket, so they are Unix-only: on Windows the
+// transport is TCP-on-localhost plus a port file (see connect_to_daemon's
+// cfg(windows) arm), which this harness does not stand up. The Windows CI job
+// therefore COMPILE-checks the Windows IPC path but does not round-trip it --
+// a known gap, and the reason the job still earns its place is that the break
+// which shipped here before (the time/cookie pin) was a compile break.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;
@@ -830,6 +860,18 @@ mod tests {
             serde_json::json!({"type": "deny_confirmation", "id": "req2"})
         );
 
+        // Per-task approve (#187): the daemon denies the unlisted items, so the
+        // indices must reach the wire exactly as chosen.
+        client.partial_approve_confirmation("req5".into(), vec![0, 2]);
+        assert_eq!(
+            read_line(&mut reader),
+            serde_json::json!({
+                "type": "partial_approve_confirmation",
+                "id": "req5",
+                "approved_indices": [0, 2],
+            })
+        );
+
         client.approve_all_confirmations();
         assert_eq!(
             read_line(&mut reader),
@@ -847,6 +889,20 @@ mod tests {
                 assert_eq!(list.len(), 1);
                 assert_eq!(list[0]["id"], "req1");
             }
+            _ => unreachable!(),
+        }
+
+        // Covers the PARSE path only. This assertion passes against the
+        // pre-fix tree too, because parsing was never broken -- lib.rs
+        // discarded the parsed event instead of emitting it. Kept as
+        // regression cover for the wire format; the forwarding fix itself is
+        // not provable here (it needs a Tauri AppHandle) and was verified by
+        // inspection of the emit arm.
+        write_half
+            .write_all(b"{\"type\":\"error\",\"message\":\"tool exploded\"}\n")
+            .unwrap();
+        match wait_for_event(&client, |e| matches!(e, IpcEvent::Error(_))) {
+            IpcEvent::Error(message) => assert!(message.contains("tool exploded")),
             _ => unreachable!(),
         }
 

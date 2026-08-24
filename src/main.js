@@ -421,11 +421,11 @@ function buildPermissionItem(item) {
     el.className = 'permission-item';
     el.dataset.id = item.id;
 
-    const tools = document.createElement('div');
-    tools.className = 'permission-item-tools';
-    tools.textContent = item.tool_names && item.tool_names.length
-        ? item.tool_names.join(', ')
-        : 'Unknown tool';
+    // tool_lines carries the rendered command per task; tool_names is the
+    // fallback the daemon sends when it has no rendered form.
+    const lines = (item.tool_lines && item.tool_lines.length)
+        ? item.tool_lines
+        : (item.tool_names || []);
 
     const meta = document.createElement('div');
     meta.className = 'permission-item-meta';
@@ -436,16 +436,71 @@ function buildPermissionItem(item) {
 
     const approveBtn = document.createElement('button');
     approveBtn.className = 'permission-action approve';
-    approveBtn.textContent = 'Approve';
-    approveBtn.addEventListener('click', () => resolveConfirmation(item.id, true));
 
     const denyBtn = document.createElement('button');
     denyBtn.className = 'permission-action deny';
     denyBtn.textContent = 'Deny';
     denyBtn.addEventListener('click', () => resolveConfirmation(item.id, false));
 
+    if (lines.length <= 1) {
+        const tools = document.createElement('div');
+        tools.className = 'permission-item-tools';
+        tools.textContent = lines.length ? lines[0] : 'Unknown tool';
+        approveBtn.textContent = 'Approve';
+        approveBtn.addEventListener('click', () => resolveConfirmation(item.id, true));
+        actions.append(approveBtn, denyBtn);
+        el.append(tools, meta, actions);
+        return el;
+    }
+
+    // A batch: let the user pick which tasks run. All start selected, so the
+    // default gesture stays whole-batch approve and nothing is a surprise.
+    const list = document.createElement('div');
+    list.className = 'permission-item-tasks';
+    const boxes = [];
+    lines.forEach((line, index) => {
+        const row = document.createElement('label');
+        row.className = 'permission-task';
+
+        const box = document.createElement('input');
+        box.type = 'checkbox';
+        box.checked = true;
+        box.addEventListener('change', syncApprove);
+        boxes.push(box);
+
+        const text = document.createElement('span');
+        text.className = 'permission-task-text';
+        text.textContent = line;
+
+        row.append(box, text);
+        list.append(row);
+    });
+
+    function selectedIndices() {
+        return boxes.map((b, i) => (b.checked ? i : -1)).filter((i) => i >= 0);
+    }
+
+    function syncApprove() {
+        const picked = selectedIndices();
+        approveBtn.disabled = picked.length === 0;
+        approveBtn.textContent = picked.length === boxes.length
+            ? `Approve all ${boxes.length}`
+            : `Approve ${picked.length} of ${boxes.length}`;
+    }
+
+    approveBtn.addEventListener('click', () => {
+        const picked = selectedIndices();
+        if (!picked.length) return;
+        if (picked.length === boxes.length) {
+            resolveConfirmation(item.id, true);
+        } else {
+            partialApproveConfirmation(item.id, picked);
+        }
+    });
+    syncApprove();
+
     actions.append(approveBtn, denyBtn);
-    el.append(tools, meta, actions);
+    el.append(list, meta, actions);
     return el;
 }
 
@@ -468,6 +523,12 @@ function renderPermissionList(items) {
 
 async function resolveConfirmation(id, approved) {
     await invoke(approved ? 'approve_confirmation' : 'deny_confirmation', { id });
+    await invoke('list_confirmations');
+}
+
+/// Approve only the checked tasks; the daemon denies the rest of that batch.
+async function partialApproveConfirmation(id, approvedIndices) {
+    await invoke('partial_approve_confirmation', { id, approvedIndices });
     await invoke('list_confirmations');
 }
 
@@ -889,6 +950,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         invoke('list_sessions');
     });
     await listen('ipc-session-error', (e) => window.alert('Session error: ' + e.payload));
+    await listen('ipc-error', (e) => window.alert('JARVIS error: ' + e.payload));
     await listen('ipc-settings', (e) => applySettings(e.payload));
     await listen('ipc-provider-list', (e) => {
         renderProviderList(e.payload);
