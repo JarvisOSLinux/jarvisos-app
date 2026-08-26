@@ -62,9 +62,17 @@ jobs:
         run: python3 src-tauri/icons/generate_icon_source.py --check
 
   # A Windows build break has shipped here before (the time/cookie pin), and
-  # ubuntu-only CI could not have caught it.
-  build-windows:
-    runs-on: windows-latest
+  # ubuntu-only CI could not have caught it. macOS is here for the same
+  # reason: nothing else compiles the cfg(target_os = "macos") paths, and it
+  # is a platform the release workflow ships bundles for.
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Whether a break is platform-specific is exactly what this job is for,
+      # so one leg failing must not cancel the other.
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
 
