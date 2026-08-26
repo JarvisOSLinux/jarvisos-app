@@ -4,7 +4,8 @@
 
 Desktop UI for the JARVIS daemon. ChatGPT-style chat interface built with
 Rust + Tauri 2 + HTML/CSS/JS. Connects to the JARVIS Python daemon over a
-bidirectional Unix socket using newline-delimited JSON.
+bidirectional IPC channel using newline-delimited JSON — a Unix socket on
+Linux/macOS, loopback TCP plus a token handshake on Windows.
 
 ## Role in the JARVIS Ecosystem
 
@@ -51,8 +52,17 @@ python/
 
 ### IPC Protocol
 
-Socket: `~/.local/share/jarvis/jarvis.sock` (mirrors daemon's data_dir).
-Override with `JARVIS_SOCKET` env var. Newline-delimited JSON.
+Socket: `<data_dir>/jarvis.sock`, mirroring the daemon's per-OS data_dir
+(Linux `~/.local/share/jarvis`, macOS `~/Library/Application Support/jarvis`,
+Windows `%LOCALAPPDATA%\jarvis`). Override with `JARVIS_SOCKET` env var.
+Newline-delimited JSON.
+
+On Windows there is no Unix socket: the daemon publishes an ephemeral
+loopback-TCP port in `<socket>.port` and a per-startup auth token in
+`<socket>.token`, and the app must send that token as the connection's
+first line or the daemon rejects the peer (`connect_tcp_with_token` in
+`src-tauri/src/ipc.rs` — portable and round-tripped by tests on every
+platform, not just compiled for Windows).
 
 **Client -> Daemon**: `message`, `start_listening`, `stop_listening`,
                       `stop_stream`, `confirmation_response`, `ping`,

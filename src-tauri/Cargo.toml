@@ -13,7 +13,16 @@ name = "jarvis-ui"
 path = "src/main.rs"
 
 [dependencies]
-tauri       = { version = "2", features = ["tray-icon"] }
+# macos-private-api: WebviewWindowBuilder::transparent() does not exist on
+# macOS without it, and the widget windows are transparent by design (first
+# macos-latest CI run failed on exactly this). Enabled unconditionally because
+# tauri-build validates the feature against THIS list textually -- a
+# target-scoped re-declaration is invisible to it; the feature gates only
+# macOS-specific code, so Linux/Windows behavior is unchanged. Paired with
+# app.macOSPrivateApi in tauri.conf.json: tauri-build demands feature and flag
+# agree on EVERY platform (either alone fails its check); both are inert at
+# runtime off macOS.
+tauri       = { version = "2", features = ["tray-icon", "macos-private-api"] }
 tauri-plugin-autostart = "2"
 tauri-plugin-dialog = "2"
 serde       = { version = "1", features = ["derive"] }

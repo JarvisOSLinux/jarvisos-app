@@ -2,7 +2,8 @@
 //!
 //! Runs a background thread that connects to the JARVIS daemon.
 //! Unix: connects via Unix domain socket.
-//! Windows: reads a `.port` file and connects via TCP to 127.0.0.1.
+//! Windows: reads a `.port` file, connects via TCP to 127.0.0.1 and sends the
+//!          `.token` handshake line the daemon authenticates loopback peers by.
 //! Auto-reconnects every 2s on disconnect.
 //!
 //! IPC thread  -> Qt thread : event_rx  (mpsc Receiver<IpcEvent>)
@@ -18,7 +19,6 @@ use std::os::unix::net::UnixStream;
 #[cfg(unix)]
 type IpcStream = UnixStream;
 
-#[cfg(windows)]
 use std::net::TcpStream;
 #[cfg(windows)]
 type IpcStream = TcpStream;
@@ -71,14 +71,48 @@ fn connect_to_daemon() -> std::io::Result<IpcStream> {
 
 #[cfg(windows)]
 fn connect_to_daemon() -> std::io::Result<IpcStream> {
-    let path = socket_path();
+    connect_tcp_with_token(&socket_path())
+}
+
+/// Reads the daemon's per-startup handshake token from `<path>.token`.
+///
+/// Missing, unreadable and empty all collapse to `None`: each means this
+/// client has nothing to present, and the daemon is the side that decides
+/// whether that is fatal.
+fn startup_token(path: &str) -> Option<String> {
+    let token = std::fs::read_to_string(format!("{}.token", path)).ok()?;
+    let token = token.trim();
+    if token.is_empty() {
+        None
+    } else {
+        Some(token.to_string())
+    }
+}
+
+/// The Windows transport: loopback TCP on the port the daemon publishes in
+/// `<path>.port`, plus the token handshake that stands in for the peer
+/// credentials loopback does not have.
+///
+/// The token goes out here, on the freshly connected stream, because the
+/// daemon blocks on that one line for 5s before honoring anything else -- by
+/// the time the caller has cloned reader and writer halves it is too late.
+///
+/// Compiled on every platform, not just Windows, so the tests can drive the
+/// real thing over loopback instead of leaving it to a compile-only CI job.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn connect_tcp_with_token(path: &str) -> std::io::Result<TcpStream> {
     let port_file = format!("{}.port", path);
     let port: u16 = std::fs::read_to_string(&port_file)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e))?
         .trim()
         .parse()
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    IpcStream::connect(("127.0.0.1", port))
+    let mut stream = TcpStream::connect(("127.0.0.1", port))?;
+    if let Some(token) = startup_token(path) {
+        stream.write_all(format!("{}\n", token).as_bytes())?;
+        stream.flush()?;
+    }
+    Ok(stream)
 }
 
 #[derive(Debug, Clone)]
@@ -768,12 +802,116 @@ fn parse_daemon_message(line: &str) -> IpcEvent {
     }
 }
 
+// The Windows handshake, exercised on every platform. Its transport is
+// loopback TCP plus two sidecar files, all of which are portable, so there is
+// no reason to leave it to the compile-only Windows job (see the AF_UNIX
+// module's preamble below) when Linux CI can round-trip the real connect path.
+#[cfg(test)]
+mod token_handshake_tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    fn unique_prefix(name: &str) -> String {
+        std::env::temp_dir()
+            .join(format!(
+                "jarvis-token-test-{}-{}-{}.sock",
+                name,
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ))
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    fn publish_port(prefix: &str, listener: &TcpListener) {
+        std::fs::write(
+            format!("{}.port", prefix),
+            listener.local_addr().unwrap().port().to_string(),
+        )
+        .unwrap();
+    }
+
+    fn cleanup(prefix: &str) {
+        let _ = std::fs::remove_file(format!("{}.port", prefix));
+        let _ = std::fs::remove_file(format!("{}.token", prefix));
+    }
+
+    #[test]
+    fn token_is_read_trimmed() {
+        let prefix = unique_prefix("trimmed");
+        std::fs::write(format!("{}.token", prefix), "  9f8e7d\n").unwrap();
+        assert_eq!(startup_token(&prefix), Some("9f8e7d".to_string()));
+        cleanup(&prefix);
+    }
+
+    #[test]
+    fn missing_token_file_yields_none() {
+        let prefix = unique_prefix("absent");
+        assert_eq!(startup_token(&prefix), None);
+    }
+
+    #[test]
+    fn blank_token_file_yields_none() {
+        let prefix = unique_prefix("blank");
+        std::fs::write(format!("{}.token", prefix), " \n\t").unwrap();
+        assert_eq!(startup_token(&prefix), None);
+        cleanup(&prefix);
+    }
+
+    // The daemon's ipc_verify_peer reads exactly one line and compares it to
+    // its per-startup token before honoring anything else, so the token has to
+    // be the first line on the wire and the caller's own traffic has to follow
+    // it intact -- a token sent late, or one that swallows the next message,
+    // both read as a failed handshake.
+    #[test]
+    fn token_is_the_first_line_on_the_wire() {
+        let prefix = unique_prefix("handshake");
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        publish_port(&prefix, &listener);
+        std::fs::write(format!("{}.token", prefix), "cafebabe\n").unwrap();
+
+        let mut client = connect_tcp_with_token(&prefix).unwrap();
+        client.write_all(b"{\"type\":\"ping\"}\n").unwrap();
+
+        let (server, _) = listener.accept().unwrap();
+        let mut lines = BufReader::new(server).lines();
+        assert_eq!(lines.next().unwrap().unwrap(), "cafebabe");
+        assert_eq!(lines.next().unwrap().unwrap(), "{\"type\":\"ping\"}");
+
+        cleanup(&prefix);
+    }
+
+    // An unreadable token file is not a client-side error: only the daemon
+    // knows whether it requires one, and its rejection names the real problem.
+    // What must not happen is a stray line ahead of the protocol.
+    #[test]
+    fn no_token_file_sends_no_handshake_line() {
+        let prefix = unique_prefix("no-token");
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        publish_port(&prefix, &listener);
+
+        let mut client = connect_tcp_with_token(&prefix).unwrap();
+        client.write_all(b"{\"type\":\"ping\"}\n").unwrap();
+
+        let (server, _) = listener.accept().unwrap();
+        let mut lines = BufReader::new(server).lines();
+        assert_eq!(lines.next().unwrap().unwrap(), "{\"type\":\"ping\"}");
+
+        cleanup(&prefix);
+    }
+}
+
 // These drive a real AF_UNIX socket, so they are Unix-only: on Windows the
 // transport is TCP-on-localhost plus a port file (see connect_to_daemon's
-// cfg(windows) arm), which this harness does not stand up. The Windows CI job
-// therefore COMPILE-checks the Windows IPC path but does not round-trip it --
-// a known gap, and the reason the job still earns its place is that the break
-// which shipped here before (the time/cookie pin) was a compile break.
+// cfg(windows) arm), which this harness does not stand up. Its connect and
+// handshake are covered portably by token_handshake_tests above; what stays
+// uncovered on Windows is the IpcClient thread pair running over that
+// transport -- a known gap, and the reason the Windows CI job still earns its
+// place is that the break which shipped here before (the time/cookie pin) was
+// a compile break.
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
