@@ -22,6 +22,14 @@ serde_json  = "1"
 # transitive dep). Cap below 0.3.52 until cookie publishes a compatible release.
 time        = ">=0.3, <0.3.52"
 
+# WebviewWindowBuilder::transparent() does not exist on macOS unless tauri's
+# macos-private-api feature is on (paired with app.macOSPrivateApi in
+# tauri.conf.json) -- the widget windows are transparent by design, and the
+# first macos-latest CI run failed on exactly this. Target-scoped so the
+# Linux/Windows dependency graph is untouched.
+[target.'cfg(target_os = "macos")'.dependencies]
+tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
